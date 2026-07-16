@@ -1,0 +1,2 @@
+RFC 9593 test. West has authby=rsa-sha2_256,ecdsa and east has authby=ecdsa.
+They should negotiate ECDSA.
