@@ -1,0 +1,2 @@
+RFC 9593 test. West has authby=rsa-sha2_256,secret and east has authby=ecdsa,secret
+They should negotiate psk.
