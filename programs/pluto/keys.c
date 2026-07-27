@@ -716,6 +716,65 @@ struct secret_pubkey_stuff *checked_private_key(const struct connection *c,
 	return pks;
 }
 
+static struct cert *find_nss_cert_by_id_and_type(const struct id *id, 
+						const struct pubkey_type *type,
+						struct logger *logger) 
+{
+	struct verbose verbose = VERBOSE(DEBUG_STREAM, logger, NULL);
+
+	KeyType key_type;
+	if (type == &pubkey_type_rsa) {
+		key_type = rsaKey;
+	} else if (type == &pubkey_type_ecdsa) {
+		key_type = ecKey;
+	} else {
+		return NULL;
+	} 
+
+	CERTCertList *certs = get_all_certificates(logger);
+
+	if (certs != NULL) {
+		for (CERTCertListNode *node = CERT_LIST_HEAD(certs); 
+			!CERT_LIST_END(node, certs); node = CERT_LIST_NEXT(node)) {
+			
+			CERTCertificate *nss_cert = node->cert;
+
+			struct cert cert = {.nss_cert = nss_cert};
+
+			const struct id cert_id = id_from_cert(&cert);
+
+			int wildcards;
+			if (!match_id(id, &cert_id, &wildcards, verbose)) {
+				continue;
+			}
+
+			ldbg(logger, "Checking if key matches");
+
+			SECKEYPublicKey *pubk = SECKEY_ExtractPublicKey(&nss_cert->subjectPublicKeyInfo);
+			if (pubk != NULL) {
+				KeyType cert_key_type = SECKEY_GetPublicKeyType(pubk);
+
+				ldbg(logger, "Checking if key matches cert_key=%d, wanted key=%d",
+					(int)cert_key_type, (int)key_type);
+
+
+				if (cert_key_type == key_type) {
+					ldbg(logger, "Found matching cert by id and type");
+
+					struct cert *cert = alloc_thing(struct cert, "cert");
+					cert->nss_cert = CERT_DupCertificate(nss_cert);
+
+					CERT_DestroyCertList(certs);
+					return cert;
+				}
+			}
+		}
+	}
+	
+	CERT_DestroyCertList(certs);
+	return NULL;
+}
+
 struct secret_pubkey_stuff *get_local_private_key(const struct connection *c,
 						  const struct pubkey_type *type,
 						  struct logger *logger)
@@ -757,6 +816,28 @@ struct secret_pubkey_stuff *get_local_private_key(const struct connection *c,
 							      &pks, &load_needed, logger);
 		return checked_private_key(c, type, pks, load_needed, err,
 					   logger, "CKAID", str_ckaid(c->local->host.config->ckaid, &ckb));
+	}
+
+	/* searching nss by ID and key type*/
+	if (c->local->host.config->cert.nss_cert == NULL) {
+		const struct id *const this_id = &c->local->host.id;
+		id_buf this_buf;
+
+		ldbg(logger, "%s() searching NSS dynamically for ID %s of kind %s",
+			__func__, str_id(this_id, &this_buf), type->name);
+
+		struct cert *cert_found = find_nss_cert_by_id_and_type(this_id, type, logger);
+
+		if (cert_found != NULL) {
+			struct secret_pubkey_stuff *pks = NULL;
+			const char *nickname = cert_nickname(cert_found);
+			bool load_needed = false;
+			err_t err = find_or_load_private_key_by_cert(&pluto_secrets,
+									cert_found,
+									&pks, &load_needed, logger);
+			return checked_private_key(c, type, pks, load_needed, err,
+						logger, "certificate", nickname);
+		}
 	}
 
 	ldbg(logger, "looking for connection %s's %s private key",
